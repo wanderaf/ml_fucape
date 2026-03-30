@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-from page import download_dados, visualizacao_dados, simulador_markowitz, gerar_dataset_ml, treinamento_rf, treinamento_xgb_reg, treinamento_svm_reg, treinamento_mlb, comparativo_final
+from page import benchmark_ibov, download_dados, visualizacao_dados, simulador_markowitz, gerar_dataset_ml, treinamento_rf, treinamento_xgb_reg, treinamento_svm_reg, treinamento_mlb, comparativo_final
 
 st.set_page_config(page_title="Simulador de Carteira", layout="wide")
 #, initial_sidebar_state="collapsed"
@@ -21,6 +21,7 @@ pagina = st.sidebar.selectbox(
         "Download dos dados",
         "Visualização dos dados",
         "Simulação Markowitz",
+        "Benchmark - IBOV",
         "Geração Dataset ML",
         "Treinamento Random Forest",
         "Treinamento XGBoost Regressor",
@@ -37,6 +38,8 @@ elif pagina == "Visualização dos dados":
     visualizacao_dados.run()
 elif pagina == "Simulação Markowitz":
     simulador_markowitz.run()
+elif pagina == "Benchmark - IBOV":
+    benchmark_ibov.run()
 elif pagina == "Geração Dataset ML":
     gerar_dataset_ml.run()
 elif pagina == "Treinamento Random Forest":
@@ -45,7 +48,7 @@ elif pagina == "Treinamento XGBoost Regressor":
     treinamento_xgb_reg.run()
 elif pagina == "Treinamento SVM Regressor":
     treinamento_svm_reg.run()
-elif pagina == "Treinamento MLB":
+elif pagina == "Treinamento MLP":
     treinamento_mlb.run()
 elif pagina == "Comparativo Final":
     comparativo_final.run()

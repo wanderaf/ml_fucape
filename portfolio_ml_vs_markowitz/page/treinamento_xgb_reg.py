@@ -7,13 +7,93 @@ from sklearn.metrics import accuracy_score
 from datetime import datetime
 import shap
 import matplotlib.pyplot as plt
+import os
 
 def run():
     st.title("🚀 XGBoost – Classificação Binária com Rolling Window de 12 Meses")
     st.info("Modelo classificador para prever retornos positivos, com rebalanceamento mensal e confiança mínima.")
 
+    # -------------------- utilitários métricas --------------------
+    def _sharpe(ret, rf=0.0):
+        r = pd.Series(ret).dropna()
+        if len(r) < 2 or r.std() == 0:
+            return np.nan
+        return float((r.mean() - rf) / r.std())
+
+    def _sortino(ret, rf=0.0):
+        r = pd.Series(ret).dropna()
+        downside = r[r < rf]
+        if len(downside) < 2 or downside.std() == 0:
+            return np.nan
+        return float((r.mean() - rf) / downside.std())
+
+    def _max_drawdown_from_equity(equity_series):
+        s = pd.Series(equity_series).astype(float)
+        dd = (s / s.cummax()) - 1.0
+        return float(dd.min()) * 100.0  # %
+
+    # reproduz exatamente a sua lógica XGB para qualquer lista de meses (treino ou teste)
+    def _build_curve_xgb(df_all, meses_periods, features, prob_thresh=0.55, start_capital=100000.0):
+        rows = []
+        capital = start_capital
+        capital_prev = capital
+        for mes in meses_periods:
+            data_ref = mes.to_timestamp()
+            data_inicio = data_ref - pd.DateOffset(months=12)
+
+            df_train = df_all[(df_all["Date"] >= data_inicio) & (df_all["Date"] < data_ref)]
+            df_test  = df_all[df_all["AnoMes"] == mes].copy()
+            df_test  = df_test[df_test["Volume"] > 500000]
+
+            if df_train.empty or df_test.empty:
+                rows.append({"Data": data_ref, "Retorno": 0.0, "Capital": capital})
+                continue
+
+            if len(df_train) > 10000:
+                df_train = df_train.sample(10000, random_state=42)
+
+            X_train = df_train[features]
+            y_train = df_train["Classe"]
+            X_test  = df_test[features]
+
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled  = scaler.transform(X_test)
+
+            modelo = XGBClassifier(
+                n_estimators=150,
+                max_depth=4,
+                learning_rate=0.05,
+                use_label_encoder=False,
+                eval_metric='logloss',
+                random_state=42
+            )
+            modelo.fit(X_train_scaled, y_train)
+
+            probs = modelo.predict_proba(X_test_scaled)
+            df_test["Proba_Classe1"] = probs[:, 1]
+            df_test = df_test[df_test["Proba_Classe1"] > prob_thresh]
+
+            if df_test.empty:
+                retorno_mensal = 0.0
+            else:
+                top_ativos = df_test.sort_values("Proba_Classe1", ascending=False).drop_duplicates("Ticker").copy()
+                top_ativos["Peso"] = 1 / len(top_ativos)
+                top_ativos["Investimento"] = capital * top_ativos["Peso"]
+                top_ativos["Valor Final"] = top_ativos["Investimento"] * (1 + top_ativos["RetFut20"])
+                capital = top_ativos["Valor Final"].sum()
+                retorno_mensal = (capital / capital_prev) - 1
+
+            capital_prev = capital
+            rows.append({"Data": data_ref, "Retorno": retorno_mensal, "Capital": capital})
+
+        if not rows:
+            return pd.DataFrame(columns=["Data", "Retorno", "Capital"])
+        return pd.DataFrame(rows).sort_values("Data")
+
     with st.spinner("🔄 Executando simulação..."):
 
+        # -------------------- dados e features --------------------
         df = pd.read_csv("data/processed/dataset_ml.csv", parse_dates=["Date"])
         df = df.dropna(subset=["Date"])
         df["AnoMes"] = df["Date"].dt.to_period("M")
@@ -33,13 +113,13 @@ def run():
         progresso = st.progress(0)
         total = len(meses_rolling)
 
+        # -------------------- loop OOS (original) --------------------
         for i, mes in enumerate(meses_rolling):
             data_ref = mes.to_timestamp()
             data_inicio = data_ref - pd.DateOffset(months=12)
 
             df_train = df[(df["Date"] >= data_inicio) & (df["Date"] < data_ref)]
             df_test = df[df["AnoMes"] == mes].copy()
-
             df_test = df_test[df_test["Volume"] > 500000]
 
             if df_train.empty or df_test.empty:
@@ -69,7 +149,6 @@ def run():
 
             probs = modelo.predict_proba(X_test_scaled)
             df_test["Proba_Classe1"] = probs[:, 1]
-
             df_test = df_test[df_test["Proba_Classe1"] > 0.55]
 
             if df_test.empty:
@@ -109,25 +188,45 @@ def run():
         df_result = pd.DataFrame(resultados).set_index("Data")
         df_result["Rentabilidade Acumulada"] = (1 + df_result["Retorno"]).cumprod()
 
-
-        # === Cálculo de Índices de Desempenho ===
+        # === Índices OOS + NOVOS (MDD/Overfit) ===
         st.subheader("📊 Índices de Desempenho")
 
         retorno_medio = df_result["Retorno"].mean()
         desvio_padrao = df_result["Retorno"].std()
-        sharpe_ratio = retorno_medio / desvio_padrao if desvio_padrao != 0 else np.nan
+        sharpe_ratio_oos = retorno_medio / desvio_padrao if desvio_padrao != 0 else np.nan
 
         retornos_negativos = df_result["Retorno"][df_result["Retorno"] < 0]
         desvio_negativo = retornos_negativos.std()
-        sortino_ratio = retorno_medio / desvio_negativo if desvio_negativo != 0 else np.nan
+        sortino_ratio_oos = retorno_medio / desvio_negativo if desvio_negativo != 0 else np.nan
 
-        col1, col2 = st.columns(2)
-        col1.metric("🔹 Índice de Sharpe", f"{sharpe_ratio:.4f}")
-        col2.metric("🔻 Índice de Sortino", f"{sortino_ratio:.4f}")
+        # construir curvas treino/teste para Overfit e Drawdown
+        cutoff = pd.to_datetime("2020-12-31")
+        meses_train = sorted(df[df["Date"] <= cutoff]["AnoMes"].unique())
+        meses_test  = sorted(df[df["Date"] >  cutoff]["AnoMes"].unique())
 
-        with open("data/results/xgboost_indices.txt", "w") as f:
-            f.write(f"{sharpe_ratio:.6f},{sortino_ratio:.6f}")
+        df_train_curve = _build_curve_xgb(df, meses_train, features)
+        df_test_curve  = _build_curve_xgb(df, meses_test,  features)
 
+        sharpe_tr  = _sharpe(df_train_curve["Retorno"]) if not df_train_curve.empty else np.nan
+        sortino_tr = _sortino(df_train_curve["Retorno"]) if not df_train_curve.empty else np.nan
+        sharpe_te  = _sharpe(df_test_curve["Retorno"])  if not df_test_curve.empty  else np.nan
+        sortino_te = _sortino(df_test_curve["Retorno"]) if not df_test_curve.empty else np.nan
+
+        overfit_ratio = np.nan
+        if pd.notna(sharpe_tr) and pd.notna(sharpe_te) and sharpe_te != 0:
+            overfit_ratio = float(sharpe_tr / sharpe_te)
+
+        mdd_tr = _max_drawdown_from_equity(df_train_curve["Capital"]) if not df_train_curve.empty else np.nan
+        mdd_te = _max_drawdown_from_equity(df_test_curve["Capital"])  if not df_test_curve.empty  else np.nan
+
+        # === exibir quatro indicadores juntos ===
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🔹 Sharpe (OOS)", f"{sharpe_ratio_oos:.4f}" if pd.notna(sharpe_ratio_oos) else "–")
+        c2.metric("🔻 Sortino (OOS)", f"{sortino_ratio_oos:.4f}" if pd.notna(sortino_ratio_oos) else "–")
+        c3.metric("📉 Max Drawdown (OOS)", f"{mdd_te:.2f}%" if pd.notna(mdd_te) else "–")
+        c4.metric("🧪 Overfit Ratio (Sharpe T/Te)", f"{overfit_ratio:.3f}" if pd.notna(overfit_ratio) else "–")
+
+        # preparar carteiras para as visualizações
         if carteiras:
             df_carteiras = pd.concat(carteiras).reset_index(drop=True)
             df_carteiras["AnoMes"] = df_carteiras["Data"].dt.to_period("M").astype(str)
@@ -152,9 +251,32 @@ def run():
     carteira_mes = df_carteiras[df_carteiras["AnoMes"] == mes_selecionado]
     st.dataframe(carteira_mes.drop(columns=["AnoMes", "Data"]).reset_index(drop=True))
 
-    df_result[["Capital"]].to_csv(f"data/results/xgb_capital.csv")
-    
-    # SHAP dinâmico com base na carteira selecionada
+    # -------------------- SALVAMENTO PARA PÁGINA COMPARATIVA --------------------
+    os.makedirs("data/results", exist_ok=True)
+
+    # capital OOS (atenção: nome padronizado p/ o comparativo = xgboost_capital.csv)
+    df_result.reset_index()[["Data", "Capital"]].to_csv("data/results/xgboost_capital.csv", index=False)
+
+    # capital treino/teste p/ overfit
+    if 'df_train_curve' in locals() and not df_train_curve.empty:
+        df_train_curve[["Data", "Capital"]].to_csv("data/results/xgboost_capital_train.csv", index=False)
+    if 'df_test_curve' in locals() and not df_test_curve.empty:
+        df_test_curve[["Data", "Capital"]].to_csv("data/results/xgboost_capital_test.csv", index=False)
+
+    # índices (usa TESTE/OOS para o principal)
+    with open("data/results/xgboost_indices.txt", "w") as f:
+        f.write(f"{sharpe_te if pd.notna(sharpe_te) else np.nan},{sortino_te if pd.notna(sortino_te) else np.nan}")
+    with open("data/results/xgboost_indices_train.txt", "w") as f:
+        f.write(f"{sharpe_tr if pd.notna(sharpe_tr) else np.nan},{sortino_tr if pd.notna(sortino_tr) else np.nan}")
+    with open("data/results/xgboost_indices_test.txt", "w") as f:
+        f.write(f"{sharpe_te if pd.notna(sharpe_te) else np.nan},{sortino_te if pd.notna(sortino_te) else np.nan}")
+
+    with open("data/results/xgboost_overfit_ratio.txt", "w") as f:
+        f.write(f"{overfit_ratio}")
+    with open("data/results/xgboost_max_drawdown_test.txt", "w") as f:
+        f.write(f"{mdd_te}")
+
+    # -------------------- SHAP Dinâmico --------------------
     st.subheader("🧠 SHAP – Explicabilidade para o mês selecionado")
 
     # Reencontra a data e filtra o dataset original

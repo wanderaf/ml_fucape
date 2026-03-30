@@ -26,7 +26,7 @@ pagina = st.sidebar.selectbox(
         "Treinamento Random Forest",
         "Treinamento XGBoost Regressor",
         "Treinamento SVM Regressor",
-        "Treinamento MLB",
+        "Treinamento MLP",
         "Comparativo Final"
 
     ]
